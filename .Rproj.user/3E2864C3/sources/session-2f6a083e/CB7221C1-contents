@@ -1,0 +1,64 @@
+#Importações dos pacotes ----
+library(tidyverse)
+library(janitor)
+
+# Carregamento do dataset ----
+dados <- read_csv2("data/concessoes_cp.csv")
+
+# Shape dos dados ----
+cat("Linhas:", nrow(dados), "| Colunas:", ncol(dados), "\n\n")
+
+# Análise de Chaves Únicas (id e member_id) ----
+dados |> 
+  summarise(
+    total_linhas   = n(),
+    n_distinct_id  = n_distinct(id),
+    n_distinct_member = n_distinct(member_id)
+)
+
+# Distribuição da Variável Alvo (fl_default) ----
+dados |> 
+  tabyl(fl_default) |> 
+  adorn_totals("row") |> 
+  adorn_pct_formatting(digits = 2) |> 
+  print()
+cat("\n")
+
+# Distribuição Temporal por Safra (issue_d) ----
+dados |> 
+  count(issue_d, name = "total_contratos") |> 
+  mutate(
+    pct = (total_contratos / sum(total_contratos)) * 100
+  ) |> 
+  print(n = 40)
+
+n_distinct(dados$issue_d)
+
+# Taxa de inadimplência por safra (estabilidade do target no tempo)
+dados |> 
+  group_by(issue_d) |> 
+  summarise(
+    total = n(),
+    defaults = sum(fl_default, na.rm = TRUE),
+    bad_rate_pct = round((defaults / total) * 100, 2)
+  ) |> 
+  print(n = 40)
+
+# Tabela com contagem e percentual de NAs por coluna ----
+  tabela_nulos <- dados |> 
+  summarise(across(everything(), ~ sum(is.na(.x)))) |> 
+  pivot_longer(
+    cols = everything(), 
+    names_to = "variavel", 
+    values_to = "qtd_nulos"
+  ) |> 
+  mutate(
+    total_linhas = nrow(dados),
+    pct_nulos = round((qtd_nulos / total_linhas) * 100, 2)
+  ) |> 
+  arrange(desc(pct_nulos))
+
+# Visualizar as colunas que possuem pelo menos 1 nulo
+tabela_nulos |> 
+  filter(qtd_nulos > 0) |> 
+  print(n = Inf)
