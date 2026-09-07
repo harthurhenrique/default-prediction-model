@@ -1,0 +1,402 @@
+---
+title: 'Análise Exploratória dos Dados'
+author: "Arthur Henrique Cavalcante Rosa"
+date: "2026-09-06"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# Configuração global dos blocos de código
+knitr::opts_chunk$set(
+  echo = TRUE,       # Mostra o código R no relatório
+  warning = FALSE,    # Oculta mensagens de aviso secundárias
+  message = FALSE     # Oculta mensagens de carregamento de pacotes
+)
+
+library(tidyverse)
+library(skimr)
+library(janitor)
+```
+
+# Carga e Visão Geral dos Dados
+
+```{r carregamento}
+# Carregamento do dataset
+dados <- read_csv2("../data/raw/concessoes_cp.csv")
+
+# Shape dos dados
+cat("Linhas:", nrow(dados), "| Colunas:", ncol(dados), "\n\n")
+```
+# Verificação de Nulos
+
+```{r missing_values, fig.width=9, fig.height=6}
+# Tabela de dados faltantes (apenas variáveis com pelo menos 1 NA)
+df_na <- dados |> 
+  summarise(across(everything(), ~ sum(is.na(.)))) |> 
+  pivot_longer(everything(), names_to = "variavel", values_to = "n_na") |> 
+  mutate(pct_na = (n_na / nrow(dados)) * 100) |> 
+  filter(n_na > 0) |> 
+  arrange(desc(pct_na))
+
+# Gráfico de barras horizontais ordenado por severidade de NAs
+ggplot(df_na, aes(x = pct_na, y = reorder(variavel, pct_na))) +
+  geom_col(fill = "#e74c3c", width = 0.7) +
+  geom_text(
+    aes(label = paste0(round(pct_na, 1), "% (", scales::comma(n_na), ")")),
+    hjust = -0.1,
+    size = 3.2,
+    color = "black"
+  ) +
+  scale_x_continuous(
+    limits = c(0, 115),
+    breaks = seq(0, 100, 20),
+    labels = function(x) paste0(x, "%")
+  ) +
+  labs(
+    title = "Incidência de Valores Ausentes por Variável",
+    subtitle = "Apenas variáveis com ausência superior a zero",
+    x = "Percentual de Valores Ausentes (%)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 9, face = "bold")
+  )
+```
+
+# Taxa de Inadimplência por Safra (issue_d)
+
+Acompanhamos a estabilidade do produto ao longo dos meses de 2016.
+
+```{r bad_rate_safra, fig.width=9, fig.height=4}
+safra_resumo <- dados |> 
+  group_by(issue_d) |> 
+  summarise(
+    contratos = n(),
+    inadimplentes = sum(fl_default == 1, na.rm = TRUE),
+    default_rate = round(inadimplentes / contratos * 100, 2)
+  )
+
+ggplot(safra_resumo, aes(x = issue_d, y = default_rate, group = 1)) +
+  geom_line(color = "#2c3e50", size = 1) +
+  geom_point(color = "#e74c3c", size = 3) +
+  geom_text(aes(label = paste0(default_rate, "%")), vjust = -1, size = 3) +
+  labs(
+    title = "Evolução da inadimplência por Safra",
+    x = "Safra",
+    y = "Inadimplência (%)"
+  ) +
+  theme_minimal()
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+# Análise Descritiva por Grupo de Variáveis
+
+```{r agrupamento_variaveis}
+vars_capacidade <- c(
+  "annual_inc",
+  "verification_status",
+  "dti",
+  "loan_amnt",
+  "int_rate"
+)
+
+vars_score <- c(
+  "fico_range_low",
+  "fico_range_high"
+)
+
+vars_inadimplencia <- c(
+  "delinq_2yrs",
+  "num_tl_30dpd",
+  "num_tl_90g_dpd_24m",
+  "acc_now_delinq",
+  "delinq_amnt",
+  "mths_since_recent_bc_dlq"
+)
+
+vars_alavancagem_birô <- c(
+  "earliest_cr_line",
+  "mo_sin_old_rev_tl_op",
+  "mo_sin_old_il_acct",
+  "mo_sin_rcnt_tl",
+  "mths_since_recent_bc",
+  "inq_last_12m",
+  "acc_open_past_24mths",
+  "num_tl_op_past_12m",
+  "num_bc_tl",
+  "num_actv_bc_tl",
+  "revol_bal",
+  "tot_cur_bal"
+)
+
+vars_cadastrais <- c(
+  "emp_length",
+  "home_ownership",
+  "purpose",
+  "addr_state",
+  "application_type"
+)
+
+grupos_eda <- list(
+  capacidade     = vars_capacidade,
+  score          = vars_score,
+  inadimplencia  = vars_inadimplencia,
+  alavancagem    = vars_alavancagem_birô,
+  cadastrais     = vars_cadastrais
+)
+
+```
+
+## Capacidade Financeira e Renda (Affordability)
+```{r boxplot_capacidade, fig.width=9, fig.height=6}
+library(tidyverse)
+
+# Remove colunas com nomes vazios ou espaços
+dados_clean <- dados[, names(dados) != "" & !is.na(names(dados))]
+
+dados_clean |> 
+  select(fl_default, any_of(vars_capacidade)) |> 
+  select(where(is.numeric)) |> 
+  mutate(fl_default = as.factor(fl_default)) |> 
+  pivot_longer(-fl_default, names_to = "variavel", values_to = "valor") |> 
+  ggplot(aes(x = fl_default, y = valor, fill = fl_default)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 2) +
+  labs(x = "Default (0 = Não, 1 = Sim)", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```   
+
+## Score e Pontuação de Birô
+```{r boxplot_score, fig.width=9, fig.height=4}
+library(tidyverse)
+
+dados_clean |> 
+  select(fl_default, any_of(vars_score)) |> 
+  select(where(is.numeric)) |> 
+  mutate(fl_default = as.factor(fl_default)) |> 
+  pivot_longer(-fl_default, names_to = "variavel", values_to = "valor") |> 
+  ggplot(aes(x = fl_default, y = valor, fill = fl_default)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 2) +
+  labs(x = "Default (0 = Não, 1 = Sim)", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+## Histórico de Inadimplência 
+
+```{r boxplot_inadimplencia, fig.width=9, fig.height=7}
+library(tidyverse)
+
+dados_clean |> 
+  select(fl_default, any_of(vars_inadimplencia)) |> 
+  select(where(is.numeric)) |> 
+  mutate(fl_default = as.factor(fl_default)) |> 
+  pivot_longer(-fl_default, names_to = "variavel", values_to = "valor") |> 
+  ggplot(aes(x = fl_default, y = valor, fill = fl_default)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 3) +
+  labs(x = "Default (0 = Não, 1 = Sim)", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+## Maturidade e Apetite por Crédito
+
+```{r boxplot_alavancagem, fig.width=10, fig.height=8}
+library(tidyverse)
+
+dados_clean |> 
+  select(fl_default, any_of(vars_alavancagem_birô)) |> 
+  select(where(is.numeric)) |> 
+  mutate(fl_default = as.factor(fl_default)) |> 
+  pivot_longer(-fl_default, names_to = "variavel", values_to = "valor") |> 
+  ggplot(aes(x = fl_default, y = valor, fill = fl_default)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 3) +
+  labs(x = "Default (0 = Não, 1 = Sim)", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r boxplot_dti, fig.width=8, fig.height=4}
+library(tidyverse)
+
+dados_clean |> 
+  select(fl_default, dti) |> 
+  filter(!is.na(dti), dti >= 0, dti <= 100) |> 
+  mutate(fl_default = factor(fl_default, levels = c(0, 1), labels = c("Não Default", "Default"))) |> 
+  ggplot(aes(x = fl_default, y = dti, fill = fl_default)) +
+  geom_boxplot(outlier.alpha = 0.15, width = 0.5) +
+  labs(
+    x = NULL,
+    y = "DTI (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## Informações cadastrais
+
+```{r barplot_cadastrais, fig.width=10, fig.height=8}
+library(tidyverse)
+
+dados_clean |> 
+  select(fl_default, any_of(vars_cadastrais)) |> 
+  select(fl_default, where(~ is.character(.) || is.factor(.))) |> 
+  pivot_longer(-fl_default, names_to = "variavel", values_to = "categoria") |> 
+  filter(!is.na(categoria)) |> 
+  group_by(variavel, categoria) |> 
+  summarise(
+    total = n(),
+    taxa_inadimplencia = mean(fl_default == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) |> 
+  filter(total >= 30) |> 
+  ggplot(aes(x = reorder(categoria, taxa_inadimplencia), y = taxa_inadimplencia)) +
+  geom_col(fill = "#e74c3c", width = 0.7) +
+  coord_flip() +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = NULL, y = "Taxa de Inadimplência (%)") +
+  theme_minimal()
+```
+
+# Análise de Correlação das Variáveis
+
+```{r correlacao_ggplot, fig.width=10, fig.height=10}
+library(tidyverse)
+
+dados_corr <- dados_clean |> 
+  select(where(is.numeric)) |> 
+  select(-any_of(c("id", "member_id", "fl_default", "last_pymnt_amnt", "hardship_length")))
+
+matriz_corr <- cor(dados_corr, use = "pairwise.complete.obs", method = "spearman")
+
+matriz_corr[upper.tri(matriz_corr)] <- NA
+
+df_corr <- as.data.frame(matriz_corr) |> 
+  rownames_to_column(var = "var1") |> 
+  pivot_longer(-var1, names_to = "var2", values_to = "correlacao") |> 
+  filter(!is.na(correlacao))
+
+ggplot(df_corr, aes(x = var1, y = var2, fill = correlacao)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = sprintf("%.2f", correlacao)),
+    color = "black",
+    size = 2.4
+  ) +
+  scale_fill_gradient2(
+    low = "#e74c3c", 
+    mid = "#ffffff", 
+    high = "#2980b9", 
+    midpoint = 0, 
+    limit = c(-1, 1),
+    name = "Spearman"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8),
+    axis.title = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+# Análise do Information Value
+
+```{r iv_scorecard, fig.width=9, fig.height=7}
+library(tidyverse)
+library(scorecard)
+
+# 1. Seleciona apenas as variáveis preditoras candidatas e o alvo
+df_iv <- dados_clean |> 
+  select(-any_of(c("id", "member_id", "issue_d", "last_pymnt_amnt", 
+                   "hardship_flag", "hardship_length", "dti_joint", 
+                   "sec_app_earliest_cr_line", "zip_code", "emp_title")))
+
+# 2. Calcula o Information Value para todas as variáveis
+iv_resultado <- scorecard::iv(df_iv, y = "fl_default")
+
+# 3. Adiciona interpretação de negócio e plota o ranking
+iv_resultado |> 
+  as_tibble() |> 
+  mutate(
+    poder_preditivo = case_when(
+      info_value < 0.02 ~ "Inútil (< 0.02)",
+      info_value < 0.10 ~ "Fraco (0.02 - 0.10)",
+      info_value < 0.30 ~ "Médio (0.10 - 0.30)",
+      info_value < 0.50 ~ "Forte (0.30 - 0.50)",
+      TRUE              ~ "Suspeito / Muito Forte (> 0.50)"
+    ),
+    poder_preditivo = factor(poder_preditivo, levels = c(
+      "Inútil (< 0.02)", "Fraco (0.02 - 0.10)", "Médio (0.10 - 0.30)", 
+      "Forte (0.30 - 0.50)", "Suspeito / Muito Forte (> 0.50)"
+    ))
+  ) |> 
+  ggplot(aes(x = reorder(variable, info_value), y = info_value, fill = poder_preditivo)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  scale_fill_manual(values = c(
+    "Inútil (< 0.02)" = "#bdc3c7",
+    "Fraco (0.02 - 0.10)" = "#f39c12",
+    "Médio (0.10 - 0.30)" = "#2980b9",
+    "Forte (0.30 - 0.50)" = "#27ae60",
+    "Suspeito / Muito Forte (> 0.50)" = "#e74c3c"
+  )) +
+  labs(
+    title = "Ranking de Poder Preditivo (Information Value)",
+    x = "Variável",
+    y = "Information Value (IV)",
+    fill = "Poder Preditivo"
+  ) +
+  theme_minimal()
+```
+
+# Análise da Cardinalidade da Variável Emp_Title
+
+```{r prova_cardinalidade_emp_title}
+library(tidyverse)
+
+# Tabela com a quantidade e percentual de singletons
+singletons_resumo <- dados |> 
+  filter(!is.na(emp_title)) |> 
+  count(emp_title) |> 
+  summarise(
+    total_cargos_distintos = n(),
+    total_singletons = sum(n == 1),
+    pct_singletons = mean(n == 1)
+  )
+
+print(singletons_resumo)
+
+# Exibe os primeiros 20 cargos que aparecem exatamente 1 vez na base inteira
+dados |> 
+  filter(!is.na(emp_title)) |> 
+  count(emp_title) |> 
+  filter(n == 1) |> 
+  select(emp_title, contagem = n) |> 
+  slice_head(n = 20) |> 
+  print(n = 20)
+
+# Top 10 cargos mais comuns vs tamanho da base
+dados |> 
+  filter(!is.na(emp_title)) |> 
+  count(emp_title, sort = TRUE) |> 
+  mutate(
+    pct = n / sum(n),
+    pct_acumulado = cumsum(pct)
+  ) |> 
+  slice_head(n = 10)
+```
+
+

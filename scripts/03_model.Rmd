@@ -1,0 +1,335 @@
+---
+title: "Modelagem"
+author: "Arthur Henrique Cavalcante Rosa"
+date: "2026-09-06"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# Configuração global dos blocos de código
+knitr::opts_chunk$set(
+  echo = TRUE,       # Mostra o código R no relatório
+  warning = FALSE,    # Oculta mensagens de aviso secundárias
+  message = FALSE     # Oculta mensagens de carregamento de pacotes
+)
+
+library(tidyverse)
+library(skimr)
+library(janitor)
+library(pROC)
+```
+
+# Carga das Bases Processadas
+
+```{r carga_dados}
+# Carregamento do dataset
+dados_treino <- read_csv("../data/trusted/feature_store_treino.csv")
+dados_teste <- read.csv("../data/trusted/feature_store_inferencia.csv")
+
+names(dados_treino) <- make.names(names(dados_treino))
+names(dados_teste)  <- make.names(names(dados_teste))
+
+# Shape dos dados
+cat("Linhas Treino:", nrow(dados_treino), "| Colunas:", ncol(dados_treino), "\n\n")
+cat("Linhas Teste:", nrow(dados_teste), "| Colunas:", ncol(dados_teste), "\n\n")
+
+# Remove colunas de metadados mantendo apenas features explicativas e target
+colunas_excluir <- c("issue_d", "id")
+
+dados_treino_modelo <- dados_treino |> select(-any_of(colunas_excluir))
+dados_teste_modelo  <- dados_teste  |> select(-any_of(colunas_excluir))
+```
+
+# Treinamento da Regressão Logística
+
+```{r treino_glm}
+# Alinhamento estrito de colunas (mesma ordem e nomes exatos do treino)
+dados_teste_modelo <- dados_teste_modelo |> 
+  select(all_of(names(dados_treino_modelo)))
+
+# Treinamento da Regressão Logística no período Jan-Set
+modelo_glm <- glm(
+  fl_default ~ .,
+  data = dados_treino_modelo,
+  family = binomial(link = "logit")
+)
+
+# Resumo dos coeficientes estatisticamente relevantes (p-valor < 0.05)
+summary(modelo_glm)$coefficients |> 
+  as.data.frame() |> 
+  rownames_to_column("variavel") |> 
+  filter(`Pr(>|z|)` < 0.05) |> 
+  arrange(`Pr(>|z|)`)
+```
+
+# Avaliação no Teste Out-of-Time
+
+```{r metricas_oot}
+# Geração dos scores/probabilidades de default
+pred_prob <- predict(modelo_glm, newdata = dados_teste_modelo, type = "response")
+
+# Curva ROC e AUC
+curva_roc <- roc(dados_teste_modelo$fl_default, pred_prob, quiet = TRUE)
+auc_val   <- as.numeric(auc(curva_roc))
+
+# Estatística Kolmogorov-Smirnov (KS)
+df_ks <- tibble(
+  alvo = dados_teste_modelo$fl_default,
+  score = pred_prob
+)
+
+ks_val <- max(
+  abs(
+    ecdf(df_ks$score[df_ks$alvo == 1])(df_ks$score) - 
+    ecdf(df_ks$score[df_ks$alvo == 0])(df_ks$score)
+  )
+)
+
+tibble(
+  Métrica = c("AUC-ROC", "KS"),
+  Valor   = c(round(auc_val, 4), round(ks_val, 4))
+)
+```
+
+# Visualização Gráfica Acumulada das Métricas
+
+## Curva ROC
+
+```{r plots_roc, fig.width=5, fig.height=5}
+# Plot da Curva ROC
+curva_roc <- roc(dados_teste_modelo$fl_default, pred_prob, quiet = TRUE)
+df_roc <- tibble(
+  especificidade = curva_roc$specificities,
+  sensibilidade  = curva_roc$sensitivities
+)
+
+ggplot(df_roc, aes(x = 1 - especificidade, y = sensibilidade)) +
+  geom_line(color = "#1f77b4", linewidth = 1.1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  annotate(
+    "text", x = 0.65, y = 0.25, 
+    label = paste0("AUC-ROC = ", round(auc(curva_roc), 4)), 
+    size = 4.5, fontface = "bold", color = "#1f77b4"
+  ) +
+  scale_x_continuous(labels = scales::percent_format()) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Curva ROC - Teste Out-of-Time",
+    subtitle = "Capacidade de ordenação global de risco do modelo",
+    x = "1 - Especificidade (Taxa de Falsos Positivos)",
+    y = "Sensibilidade (Taxa de Verdadeiros Positivos)"
+  ) +
+  theme_minimal()
+```
+
+## Curva KS (Kolmogorov-Smirnov)
+
+```{r plots_ks, fig.width=5, fig.height=5}
+# Plot da Curva KS (Kolmogorov-Smirnov)
+df_ks_plot <- tibble(
+  alvo  = dados_teste_modelo$fl_default,
+  score = pred_prob
+) |> 
+  arrange(score) |> 
+  mutate(
+    cum_maus = cumsum(alvo == 1) / sum(alvo == 1),
+    cum_bons = cumsum(alvo == 0) / sum(alvo == 0),
+    diff_ks  = abs(cum_maus - cum_bons)
+  )
+
+# Ponto de máxima separação
+ponto_ks <- df_ks_plot |> slice_max(diff_ks, n = 1, with_ties = FALSE)
+
+ggplot(df_ks_plot, aes(x = score)) +
+  geom_line(aes(y = cum_maus, color = "Maus (Default = 1)"), linewidth = 1.1) +
+  geom_line(aes(y = cum_bons, color = "Bons (Default = 0)"), linewidth = 1.1) +
+  geom_segment(
+    aes(x = ponto_ks$score, xend = ponto_ks$score, 
+        y = ponto_ks$cum_bons, yend = ponto_ks$cum_maus),
+    color = "black", linetype = "dashed", linewidth = 0.9
+  ) +
+  annotate(
+    "text", x = ponto_ks$score + 0.05, 
+    y = (ponto_ks$cum_maus + ponto_ks$cum_bons) / 2,
+    label = paste0("KS = ", round(ponto_ks$diff_ks * 100, 2), "%\n(Score: ", round(ponto_ks$score, 3), ")"),
+    hjust = 0, fontface = "bold"
+  ) +
+  scale_color_manual(values = c("Maus (Default = 1)" = "#d95f02", "Bons (Default = 0)" = "#1b9e77")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Estatística Kolmogorov-Smirnov (KS)",
+    subtitle = "Distribuição acumulada de probabilidade predita por classe",
+    x = "Score Predito (Probabilidade de Default)",
+    y = "Percentual Acumulado",
+    color = "População"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+# Visualização Gráfica por Safras das Métricas
+
+```{r metricas_por_safra}
+# Função auxiliar para cálculo do KS
+calc_ks <- function(alvo, score) {
+  df <- tibble(alvo = alvo, score = score)
+  max(abs(
+    ecdf(df$score[df$alvo == 1])(df$score) - 
+    ecdf(df$score[df$alvo == 0])(df$score)
+  ))
+}
+
+# Associa a predição e o target à safra correspondente
+df_oot_safra <- tibble(
+  issue_d = dados_teste$issue_d,
+  alvo    = dados_teste_modelo$fl_default,
+  score   = pred_prob
+)
+
+# Tabela de performance mensal
+metricas_safra <- df_oot_safra |> 
+  group_by(issue_d) |> 
+  summarise(
+    volume         = n(),
+    inadimplencia  = mean(alvo),
+    auc_roc        = as.numeric(auc(roc(alvo, score, quiet = TRUE))),
+    ks             = calc_ks(alvo, score),
+    .groups        = "drop"
+  ) |> 
+  arrange(issue_d)
+
+metricas_safra
+```
+```{r plot_estabilidade_temporal, fig.width=7, fig.height=4}
+metricas_safra |> 
+  pivot_longer(cols = c(auc_roc, ks), names_to = "metrica", values_to = "valor") |> 
+  mutate(metrica = if_else(metrica == "auc_roc", "AUC-ROC", "KS")) |> 
+  ggplot(aes(x = as.factor(issue_d), y = valor, group = metrica, color = metrica)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_text(aes(label = round(valor, 3)), vjust = -0.8, fontface = "bold", size = 3.5) +
+  scale_y_continuous(limits = c(0.2, 0.8), labels = scales::number_format(accuracy = 0.01)) +
+  scale_color_manual(values = c("AUC-ROC" = "#1f77b4", "KS" = "#d95f02")) +
+  labs(
+    title = "Estabilidade do Score por Safra (Out-of-Time)",
+    subtitle = "Acompanhamento mensal de AUC-ROC e KS no período de teste",
+    x = "Safra (issue_d)",
+    y = "Valor da Métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Tabela de Decis de Score e Calibração
+
+```{r tabela_decis}
+# Construção dos decis de risco ordenados
+tabela_decis <- df_oot_safra |> 
+  mutate(decil = ntile(score, 10)) |> 
+  group_by(decil) |> 
+  summarise(
+    qtd_clientes  = n(),
+    score_min     = min(score),
+    score_max     = max(score),
+    qtd_default   = sum(alvo),
+    taxa_default  = mean(alvo),
+    .groups       = "drop"
+  ) |> 
+  arrange(desc(decil)) |> 
+  mutate(
+    perc_default_acum = cumsum(qtd_default) / sum(qtd_default),
+    perc_base_acum    = cumsum(qtd_clientes) / sum(qtd_clientes)
+  )
+
+tabela_decis
+```
+
+# Segmentação de Ratings via Árvore de Decisão
+
+```{r ratings_cart}
+library(rpart)
+# Ajusta árvore unidimensional para maximizar separação de default
+# maxdepth = 3 limita em até 8 nós terminais (ratings)
+# minbucket garante que cada rating tenha representatividade mínima (ex: 5% da base)
+tree_ratings <- rpart(
+  alvo ~ score,
+  data = df_oot_safra,
+  method = "anova",
+  control = rpart.control(
+    maxdepth = 4,
+    minbucket = round(0.08 * nrow(df_oot_safra)),
+    cp = 0.001
+  )
+)
+
+# Extrai os splits ótimos e define as fronteiras
+cortes_otimos <- sort(unique(tree_ratings$splits[, "index"]))
+limites <- c(-Inf, cortes_otimos, Inf)
+rotulos_rating <- LETTERS[1:(length(limites) - 1)]
+
+# Tabela final de esteira por Ratings
+tabela_ratings_cart <- df_oot_safra |> 
+  mutate(rating = cut(score, breaks = limites, labels = rotulos_rating, right = TRUE)) |> 
+  group_by(rating) |> 
+  summarise(
+    qtd_clientes      = n(),
+    perc_populacao    = n() / nrow(df_oot_safra),
+    score_min         = min(score),
+    score_max         = max(score),
+    taxa_default_real = mean(alvo),
+    .groups           = "drop"
+  ) |> 
+  arrange(rating)
+
+tabela_ratings_cart
+```
+
+# Política de Utilização do Modelo
+
+## Ratings de Crédito
+
+* **Rating A (Risco Mínimo):** Taxa de *default* esperada de **4%**
+* **Rating B (Risco Baixo):** Taxa de *default* esperada de **10%**
+* **Rating C (Risco Médio):** Taxa de *default* esperada de **17%**
+* **Rating D (Risco Alto):** Taxa de *default* esperada de **28%**
+* **Rating E (Risco Crítico):** Taxa de *default* esperada de **45%**
+
+---
+
+## Sugestão de Direcionais de Negócio
+
+* **Rating A:** Concessão com limites máximos pré-aprovados.
+* **Rating B:** Limite pleno compatível com a renda declarada.
+* **Rating C:** Limite moderado, priorizando entrada conservadora com esteira de aumento gradual.
+* **Rating D:** Limite restritivo e prazos reduzidos.
+* **Rating E:** Concessão de limite inviável economicamente (recusa automática para crédito sem garantia).
+  
+  
+# Salvamento da Base Final Escorada  
+```{r salvar_base_escorada}
+library(tidyverse)
+
+# Estruturação da base final com os campos solicitados
+base_escorada_oot <- tibble(
+  id      = dados_teste$id,         
+  safra   = dados_teste$issue_d,
+  score   = round(pred_prob, 3),
+  rating  = cut(pred_prob, breaks = limites, labels = rotulos_rating, right = TRUE)
+)
+
+write_csv(base_escorada_oot, "../data/delivery/base_escorada_oot.csv")
+
+cat("Base escorada exportada com sucesso (base_escorada_oot.csv)!\n")
+```
+
+# Serialização do Modelo Final
+
+```{r salvar_modelo}
+saveRDS(modelo_glm, "../model/modelo_regressao_logistica.rds")
+
+cat("Modelo final serializado com sucesso: modelo_regressao_logistica.rds\n")
+```

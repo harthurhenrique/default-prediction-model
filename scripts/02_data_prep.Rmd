@@ -1,0 +1,299 @@
+---
+title: "Preparação dos Dados e Criação de Feature Stores"
+author: "Arthur Henrique Cavalcante Rosa"
+date: "2026-09-06"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# Configuração global dos blocos de código
+knitr::opts_chunk$set(
+  echo = TRUE,       # Mostra o código R no relatório
+  warning = FALSE,    # Oculta mensagens de aviso secundárias
+  message = FALSE     # Oculta mensagens de carregamento de pacotes
+)
+
+library(tidyverse)
+library(skimr)
+library(janitor)
+```
+
+```{r carregamento}
+# Carregamento do dataset
+dados <- read_csv2("../data/raw/concessoes_cp.csv")
+```
+
+# Exclusão de Variáveis
+
+## Vazamento Temporal (Data Leakage)
+```{r drop_leakage_e_operacionais}
+vars_drop_leakage <- c(
+  "last_pymnt_amnt", "hardship_flag", "hardship_length"
+)
+
+dados <- dados |> 
+  select(-any_of(vars_drop_leakage))
+```
+
+## Excesso de Nulos ou Alta Cardinalidade
+```{r drop_qualidade_e_nulos}
+vars_drop_qualidade <- c(
+  "dti_joint", "sec_app_earliest_cr_line", "member_id",
+  "mths_since_recent_bc_dlq", "emp_title", "zip_code"
+)
+
+dados <- dados |> 
+  select(-any_of(vars_drop_qualidade))
+```
+
+## Ruído Estatístico (Information Value < 0.02)
+```{r drop_iv_baixo}
+vars_drop_iv <- c(
+  "emp_length",
+  "num_actv_bc_tl",
+  "delinq_amnt",
+  "purpose",
+  "num_bc_tl",
+  "delinq_2yrs",
+  "num_tl_90g_dpd_24m",
+  "acc_now_delinq",
+  "application_type",
+  "...1",            # Índice da leitura do CSV
+  "num_tl_30dpd"
+)
+
+dados <- dados |> 
+  select(-any_of(vars_drop_iv))
+```
+
+```{r checagem_variaveis_restantes}
+# 1. Quantidade total de colunas restantes
+ncol(dados)
+
+# 2. Lista completa com nome e tipo de cada variável
+glimpse(dados)
+```
+# Nova Verificação da Qualidade dos Dados
+
+```{r analise_nulos}
+library(tidyverse)
+
+# Tabela com contagem e percentual de nulos ordenada do maior para o menor
+dados |> 
+  summarise(across(everything(), ~ sum(is.na(.)))) |> 
+  pivot_longer(everything(), names_to = "variavel", values_to = "total_na") |> 
+  mutate(
+    total_linhas = nrow(dados),
+    pct_na = round((total_na / total_linhas) * 100, 2)
+  ) |> 
+  arrange(desc(total_na)) |> 
+  print(n = Inf)
+```
+# Tratamento de Dados Nulos
+
+Trata os casos nulos utilizando a mediana da respectiva variável, considerando apenas dados da safra atual do registro nulo para o calculo da mediana.
+
+```{r imputacao_mediana_safra}
+library(tidyverse)
+vars_imputar <- c("dti", "inq_last_12m", "mths_since_recent_bc", "mo_sin_old_il_acct")
+
+dados <- dados |> 
+  group_by(issue_d) |> 
+  mutate(
+    across(
+      all_of(vars_imputar),
+      ~ if_else(is.na(.), median(., na.rm = TRUE), .)
+    )
+  ) |> 
+  ungroup() |> 
+  # Fallback: caso alguma safra inteira tenha ficado sem mediana (100% NAs)
+  mutate(
+    across(
+      all_of(vars_imputar),
+      ~ if_else(is.na(.), median(., na.rm = TRUE), .)
+    )
+  )
+
+# Checagem se zerou os nulos dessas 4 variáveis
+dados |> 
+  summarise(across(all_of(vars_imputar), ~ sum(is.na(.))))
+```
+
+# Tratamento de Multicolinearidade
+
+## Variáveis Numéricas
+Dois pares de variáveis se mostraram altamente correlacionados, são eles:
+  1. fico_range_low e fico_range_high: com uma correlação de 1.0, vou criar um score unico para os dados de fico que será a média das duas variáveis.
+  2. num_tl_op_past_12m e acc_open_past_24mths: com uma correlação de 0.76, nesse caso vou manter a variável acc_open_past_24mths pois ela tem um information value maior.
+  3. A variável earliest_cr_line apensar de ser categórica já é representada pela acc_open_past_24mths logo também será retirada.
+  
+```{r ajuste_pares_correlacionados}
+dados <- dados |> 
+  mutate(
+    # Cria o score central e remove as duas colunas redundantes
+    fico_score = (fico_range_low + fico_range_high) / 2
+  ) |> 
+  select(-fico_range_low, -fico_range_high)
+
+# Mantém a de maior IV: acc_open_past_24mths)
+dados <- dados |> 
+  select(-num_tl_op_past_12m, -earliest_cr_line)
+```
+
+## Variáveis Categóricas
+
+```{r checa_duplicidade_verification}
+# Verifica se os valores são 100% iguais linha a linha
+prop_iguais <- mean(dados[["verification_status...7"]] == dados[["verification_status...39"]], na.rm = TRUE)
+total_na_7   <- sum(is.na(dados[["verification_status...7"]]))
+total_na_39  <- sum(is.na(dados[["verification_status...39"]]))
+
+tibble(
+  proporcao_iguais = prop_iguais,
+  nulos_col_7 = total_na_7,
+  nulos_col_39 = total_na_39
+)
+```
+Como a proporção bateu 100% entendo que as variáveis possuem os mesmos dados, logo ficamos apenas com uma que foi renomeada para verification_status.
+```{r resolver_duplicidade_verification}
+dados <- dados |> 
+  rename(verification_status = `verification_status...7`) |> 
+  select(-`verification_status...39`)
+```
+
+
+# Tratamento de Outliers
+
+Para fazer o tratamento de outliers e evitar um possível data leakage vou dividir os dados de treino e teste antes do tratamento:
+```{r split}
+dados_treino <- dados |> 
+  filter(month(issue_d) >= 1 & month(issue_d) <= 9)
+
+dados_teste <- dados |> 
+  filter(month(issue_d) >= 10 & month(issue_d) <= 12)
+
+# Validação do volume em cada partição
+cat("Linhas Treino (Jan-Set):", nrow(dados_treino), "\n")
+cat("Linhas Teste (Out-Dez):", nrow(dados_teste), "\n")
+```
+
+Capping superior (Winsorization a 99%): trava valores extremos no percentil 99 
+calculado no treino, evitando distorções por outliers sem descartar registros.
+
+```
+glimpse(dados)
+```
+
+
+```{r outliers}
+vars_continuas <- c(
+  "dti", "inq_last_12m", "int_rate", "loan_amnt", "tot_cur_bal", "annual_inc", "revol_bal", "mo_sin_old_rev_tl_op", "acc_open_past_24mths", "mo_sin_old_il_acct", "mo_sin_rcnt_tl", "mths_since_recent_bc"
+)
+
+vars_categoricas <- c(
+  "addr_state", "verification_status", "home_ownership"
+)
+
+# Calcula o percentil 99 EXCLUSIVAMENTE nos dados de treino
+limites_p99 <- dados_treino |> 
+  summarise(across(all_of(vars_continuas), ~ quantile(., 0.99, na.rm = TRUE)))
+
+# Função para aplicar as réguas de corte calculadas no treino
+aplica_capping <- function(df, limites) {
+  for (col in names(limites)) {
+    teto <- limites[[col]][[1]]
+    df[[col]] <- if_else(df[[col]] > teto, teto, df[[col]])
+  }
+  df
+}
+
+# Aplica os limites calculados no treino tanto no treino quanto no teste
+dados_treino <- aplica_capping(dados_treino, limites_p99)
+dados_teste  <- aplica_capping(dados_teste, limites_p99)
+```
+
+
+# Tratamento de Variáveis Categóricas
+
+Para conseguir usar as variáveis categóricas é necessário transforma-las em variáveis númericas, nesse cenário vou usar uma abordagem hibrida.
+Para variáveis que possuem baixa cardinalidade (home_ownership everification_status) vou usar o One-Hot Encoding.
+Ja para variáveis que tem alta cardinalidade, ou seja, muitas categorias, vou optar pelo Target Encoding que substitui cada categoria pela taxa média histórica de inadimplência, condensando dezenas de níveis em uma única coluna contínua sem explodir a dimensionalidade com dezenas de dummies esparsas.
+
+```{r checa_cardinalidade}
+library(tidyverse)
+
+# Lista variáveis categóricas e conta os níveis únicos no treino
+resumo_categoricas <- dados_treino |> 
+  select(where(~ is.character(.) || is.factor(.))) |> 
+  summarise(across(everything(), ~ n_distinct(.))) |> 
+  pivot_longer(everything(), names_to = "variavel", values_to = "n_niveis") |> 
+  arrange(desc(n_niveis))
+
+print(resumo_categoricas)
+```
+
+```{r encoding_hibrido}
+library(tidyverse)
+library(fastDummies)
+
+# Target Encoding para addr_state (calculado estritamente no treino)
+media_global <- mean(dados_treino$fl_default)
+
+mapa_estado <- dados_treino |> 
+  group_by(addr_state) |> 
+  summarise(
+    n = n(),
+    addr_state_encoded = (sum(fl_default) + 10 * media_global) / (n + 10),
+    .groups = "drop"
+  ) |> 
+  select(addr_state, addr_state_encoded)
+
+# Aplica o encoding no Treino e no Teste
+dados_treino <- dados_treino |> 
+  left_join(mapa_estado, by = "addr_state") |> 
+  mutate(addr_state_encoded = coalesce(addr_state_encoded, media_global)) |> 
+  select(-addr_state)
+
+dados_teste <- dados_teste |> 
+  left_join(mapa_estado, by = "addr_state") |> 
+  mutate(addr_state_encoded = coalesce(addr_state_encoded, media_global)) |> 
+  select(-addr_state)
+
+# One-Hot Encoding para home_ownership e verification_status
+vars_dummies <- c("home_ownership", "verification_status")
+
+dados_treino <- dummy_cols(
+  dados_treino, 
+  select_columns = vars_dummies, 
+  remove_first_dummy = TRUE, 
+  remove_selected_columns = TRUE
+)
+
+dados_teste <- dummy_cols(
+  dados_teste, 
+  select_columns = vars_dummies, 
+  remove_first_dummy = TRUE, 
+  remove_selected_columns = TRUE
+)
+
+# Alinhamento de colunas (garante idêntica ordem e estrutura nas duas bases)
+dados_teste <- dados_teste |> select(all_of(names(dados_treino)))
+```
+
+# Salvamento das Feature Stores
+
+```{r exportar_feature_stores}
+library(readr)
+
+# 1. Exporta em CSV (legível e universal)
+write_csv(dados_treino, "../data/trusted/feature_store_treino.csv")
+write_csv(dados_teste,  "../data/trusted/feature_store_inferencia.csv")
+
+# Confirmação do tamanho das bases salvas
+cat("Treino salvo:", nrow(dados_treino), "linhas e", ncol(dados_treino), "colunas.\n")
+cat("Inferência salva:", nrow(dados_teste), "linhas e", ncol(dados_teste), "colunas.\n")
+```
