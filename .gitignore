@@ -1,4 +1,3 @@
-.Rproj.user/
 .Rhistory
 .RData
 .Ruserdata/
@@ -14,3 +13,4 @@
 renv/
 *.Rproj
 reports/Case_Agibank_Arthur_Rosa.pdf
+.Rproj.user
