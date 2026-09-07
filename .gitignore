@@ -9,3 +9,8 @@
 .renv/
   .renv/
 .reports/
+.Rhistory
+.Rprofile
+renv/
+*.Rproj
+reports/Case_Agibank_Arthur_Rosa.pdf
