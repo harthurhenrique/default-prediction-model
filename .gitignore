@@ -3,6 +3,9 @@
 .RData
 .Ruserdata/
 *.Rproj.user
+*.Rproj
 .Rprofile
 .Rhistory
 .renv/
+  .renv/
+.reports/
