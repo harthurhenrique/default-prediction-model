@@ -1,4 +1,4 @@
-# Case Agibank: Modelo de Credit Scoring 
+# Modelo de Credit Scoring 
 Pacote de entrega contendo o pipeline analítico completo de modelagem estatística. O projeto contempla desde o diagnóstico exploratório e tratamento de dados sem contaminação temporal (*data leakage*) até o treinamento da Regressão Logística, validação *Out-of-Time* (OOT) e agrupamento ótimo de *ratings* de risco via CART para suporte à esteira de concessão.
 
 ---
@@ -23,7 +23,7 @@ Este projeto utiliza o gerenciador de dependências [`renv`](https://rstudio.git
 ## 2. Estrutura do Diretório
 
 ```text
-case-agibank/
+sua-pasta/
 ├── data/
 │   ├── raw/         # Base bruta original (concessoes_cp.csv)
 │   ├── trusted/     # Feature stores tratadas (treino e teste OOT)
